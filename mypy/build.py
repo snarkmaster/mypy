@@ -52,6 +52,7 @@ from mypy.types import Type
 from mypy.version import __version__
 from mypy.plugin import Plugin, DefaultPlugin, ChainedPlugin
 from mypy.defaults import PYTHON3_VERSION_MIN
+from mypy.server.deps import get_dependencies
 
 
 PYTHON_EXTENSIONS = ['.pyi', '.py']
@@ -386,6 +387,7 @@ CacheMeta = NamedTuple('CacheMeta',
                         ('size', int),
                         ('hash', str),
                         ('dependencies', List[str]),  # names of imported modules
+                        ('fine_grained_deps', Dict[str, List[str]]),
                         ('data_mtime', int),  # mtime of data_json
                         ('data_json', str),  # path of <id>.data.json
                         ('suppressed', List[str]),  # dependencies that weren't imported
@@ -411,6 +413,7 @@ def cache_meta_from_dict(meta: Dict[str, Any], data_json: str) -> CacheMeta:
         meta.get('size', sentinel),
         meta.get('hash', sentinel),
         meta.get('dependencies', []),
+        meta.get('fine_grained_deps', {}),
         int(meta['data_mtime']) if 'data_mtime' in meta else sentinel,
         data_json,
         meta.get('suppressed', []),
@@ -1151,6 +1154,7 @@ def validate_meta(meta: Optional[CacheMeta], id: str, path: Optional[str],
                 'hash': source_hash,
                 'data_mtime': data_mtime,
                 'dependencies': meta.dependencies,
+                'fine_grained_deps': meta.fine_grained_deps,
                 'suppressed': meta.suppressed,
                 'child_modules': meta.child_modules,
                 'options': (manager.options.clone_for_module(id)
@@ -1183,7 +1187,9 @@ def compute_hash(text: str) -> str:
 
 
 def write_cache(id: str, path: str, tree: MypyFile,
-                dependencies: List[str], suppressed: List[str],
+                dependencies: List[str],
+                fine_grained_deps: Dict[str, List[str]],
+                suppressed: List[str],
                 child_modules: List[str], dep_prios: List[int],
                 old_interface_hash: str, source_hash: str,
                 ignore_all: bool, manager: BuildManager) -> Tuple[str, Optional[CacheMeta]]:
@@ -1278,6 +1284,7 @@ def write_cache(id: str, path: str, tree: MypyFile,
             'hash': source_hash,
             'data_mtime': data_mtime,
             'dependencies': dependencies,
+            'fine_grained_deps': fine_grained_deps,
             'suppressed': suppressed,
             'child_modules': child_modules,
             'options': options.select_options_affecting_cache(),
@@ -1486,7 +1493,7 @@ class State:
     data = None  # type: Optional[str]
     tree = None  # type: Optional[MypyFile]
     is_from_saved_cache = False  # True if the tree came from the in-memory cache
-    dependencies = None  # type: List[str]  # Modules directly imported by the module
+    dependencies = None  # type: List[str]
     suppressed = None  # type: List[str]  # Suppressed/missing dependencies
     priorities = None  # type: Dict[str, int]
 
@@ -1522,6 +1529,8 @@ class State:
 
     # Whether the module has an error or any of its dependencies have one.
     transitive_error = False
+
+    fine_grained_deps = None  # type: Dict[str, Set[str]]
 
     # Type checker used for checking this file.  Use type_checker() for
     # access and to construct this on demand.
@@ -1622,6 +1631,7 @@ class State:
             # Make copies, since we may modify these and want to
             # compare them to the originals later.
             self.dependencies = list(self.meta.dependencies)
+            self.fine_grained_deps = {k: set(v) for k, v in self.meta.fine_grained_deps.items()}
             self.suppressed = list(self.meta.suppressed)
             assert len(self.meta.dependencies) == len(self.meta.dep_prios)
             self.priorities = {id: pri
@@ -1630,6 +1640,7 @@ class State:
             self.dep_line_map = {}
         else:
             # Parse the file (and then some) to get the dependencies.
+            self.fine_grained_deps = {}
             self.parse_file()
             self.suppressed = []
             self.child_modules = set()
@@ -1977,6 +1988,19 @@ class State:
             elif dep not in self.suppressed and dep in self.manager.missing_modules:
                 self.suppressed.append(dep)
 
+    def find_fine_grained_deps(self) -> None:
+        assert self.tree is not None
+        if '/typeshed/' in self.xpath or self.xpath.startswith('typeshed/'):
+            # We don't track changes to typeshed -- the assumption is that they are only changed
+            # as part of mypy updates, which will invalidate everything anyway.
+            #
+            # TODO: Not a reliable test, as we could have a package named typeshed.
+            # TODO: Consider relaxing this -- maybe allow some typeshed changes to be tracked.
+            return
+        self.fine_grained_deps = get_dependencies(target=self.tree,
+                                                  type_map=self.type_map(),
+                                                  python_version=self.options.python_version)
+
     def valid_references(self) -> Set[str]:
         assert self.ancestors is not None
         valid_refs = set(self.dependencies + self.suppressed + self.ancestors)
@@ -2003,7 +2027,9 @@ class State:
         dep_prios = self.dependency_priorities()
         new_interface_hash, self.meta = write_cache(
             self.id, self.path, self.tree,
-            list(self.dependencies), list(self.suppressed), list(self.child_modules),
+            list(self.dependencies),
+            {k: list(v) for k, v in self.fine_grained_deps.items()},
+            list(self.suppressed), list(self.child_modules),
             dep_prios, self.interface_hash, self.source_hash, self.ignore_all,
             self.manager)
         if new_interface_hash == self.interface_hash:
@@ -2534,6 +2560,8 @@ def process_stale_scc(graph: Graph, scc: List[str], manager: BuildManager) -> No
             graph[id].transitive_error = True
     for id in stale:
         graph[id].finish_passes()
+        if manager.options.cache_fine_grained:
+            graph[id].find_fine_grained_deps()
         graph[id].generate_unused_ignore_notes()
         manager.flush_errors(manager.errors.file_messages(graph[id].xpath), False)
         graph[id].write_cache()
