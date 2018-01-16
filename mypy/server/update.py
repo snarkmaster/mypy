@@ -281,9 +281,10 @@ class FineGrainedBuildManager:
             print('triggered:', sorted(filtered))
         self.triggered.extend(triggered | self.previous_targets_with_errors)
         collect_dependencies({module: tree}, self.deps, graph)
-        propagate_changes_using_dependencies(manager, graph, self.deps, triggered,
-                                             {module},
-                                             self.previous_targets_with_errors)
+        remaining += propagate_changes_using_dependencies(
+            manager, graph, self.deps, triggered,
+            {module},
+            self.previous_targets_with_errors)
 
         # Preserve state needed for the next update.
         self.previous_targets_with_errors = manager.errors.targets()
@@ -707,9 +708,10 @@ def propagate_changes_using_dependencies(
         deps: Dict[str, Set[str]],
         triggered: Set[str],
         up_to_date_modules: Set[str],
-        targets_with_errors: Set[str]) -> None:
+        targets_with_errors: Set[str]) -> List[Tuple[str, str]]:
     # TODO: Multiple type checking passes
     num_iter = 0
+    remaining_modules = []
 
     # Propagate changes until nothing visible has changed during the last
     # iteration.
@@ -733,7 +735,13 @@ def propagate_changes_using_dependencies(
         # TODO: Preserve order (set is not optimal)
         for id, nodes in sorted(todo.items(), key=lambda x: x[0]):
             assert id not in up_to_date_modules
-            triggered |= reprocess_nodes(manager, graph, id, nodes, deps)
+            # TODO: Is there a better way to detect that the file isn't loaded?
+            if not manager.modules[id].defs:
+                # We haven't actually loaded this file! Add it to the
+                # queue of files that need to be processed fully.
+                remaining_modules.append((id, manager.modules[id].path))
+            else:
+                triggered |= reprocess_nodes(manager, graph, id, nodes, deps)
         # Changes elsewhere may require us to reprocess modules that were
         # previously considered up to date. For example, there may be a
         # dependency loop that loops back to an originally processed module.
@@ -741,6 +749,8 @@ def propagate_changes_using_dependencies(
         targets_with_errors = set()
         if DEBUG:
             print('triggered:', list(triggered))
+
+    return remaining_modules
 
 
 def find_targets_recursive(
@@ -989,4 +999,6 @@ def lookup_target(modules: Dict[str, MypyFile], target: str) -> List[DeferredNod
 
 
 def extract_type_maps(graph: Graph) -> Dict[str, Dict[Expression, Type]]:
-    return {id: state.type_map() for id, state in graph.items()}
+    # This is used to export information used only by the testmerge harness.
+    return {id: state.type_map() for id, state in graph.items()
+            if state.tree}

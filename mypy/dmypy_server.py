@@ -105,7 +105,8 @@ class Server:
         if self.fine_grained:
             options.incremental = True
             options.show_traceback = True
-            options.cache_dir = os.devnull
+            if not options.cache_fine_grained:
+                options.cache_dir = os.devnull
 
     def serve(self) -> None:
         """Serve requests, synchronously (no thread or fork)."""
