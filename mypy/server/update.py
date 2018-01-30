@@ -442,6 +442,7 @@ def update_single_isolated(module: str,
     # Perform type checking.
     state.type_check_first_pass()
     state.type_check_second_pass()
+    state.find_fine_grained_deps()
     state.finish_passes()
     # TODO: state.write_cache()?
     # TODO: state.mark_as_rechecked()?
@@ -651,7 +652,6 @@ def collect_dependencies(new_modules: Mapping[str, Optional[MypyFile]],
     for id, node in new_modules.items():
         if node is None:
             continue
-        graph[id].find_fine_grained_deps()
         for trigger, targets in graph[id].fine_grained_deps.items():
             deps.setdefault(trigger, set()).update(targets)
 
