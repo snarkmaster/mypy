@@ -319,6 +319,9 @@ def mark_all_meta_as_memory_only(graph: Dict[str, State],
 def get_all_dependencies(manager: BuildManager, graph: Dict[str, State],
                          options: Options) -> Dict[str, Set[str]]:
     """Return the fine-grained dependency map for an entire build."""
+    if not options.cache_fine_grained:
+        for state in graph.values():
+            state.find_fine_grained_deps()
     deps = {}  # type: Dict[str, Set[str]]
     collect_dependencies(manager.modules, deps, graph)
     return deps
